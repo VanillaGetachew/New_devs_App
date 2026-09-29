@@ -1,58 +1,78 @@
 import asyncio
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-from sqlalchemy.pool import QueuePool
 import logging
 from ..config import settings
+import os
 
 logger = logging.getLogger(__name__)
+
+
+def _async_database_url() -> str:
+    """Prefer DATABASE_URL / settings.database_url (docker-compose), fall back to sync URL."""
+    raw = (
+        os.getenv("DATABASE_URL")
+        or getattr(settings, "database_url", None)
+        or "postgresql://postgres:postgres@db:5432/propertyflow"
+    )
+    if raw.startswith("postgresql+asyncpg://"):
+        return raw
+    if raw.startswith("postgresql://"):
+        return raw.replace("postgresql://", "postgresql+asyncpg://", 1)
+    if raw.startswith("postgres://"):
+        return raw.replace("postgres://", "postgresql+asyncpg://", 1)
+    return raw
+
 
 class DatabasePool:
     def __init__(self):
         self.engine = None
         self.session_factory = None
-        
+
     async def initialize(self):
         """Initialize database connection pool"""
+        if self.session_factory:
+            return
+
         try:
-            # Create async engine with connection pooling
-            database_url = f"postgresql+asyncpg://{settings.supabase_db_user}:{settings.supabase_db_password}@{settings.supabase_db_host}:{settings.supabase_db_port}/{settings.supabase_db_name}"
-            
+            database_url = _async_database_url()
+
             self.engine = create_async_engine(
                 database_url,
-                poolclass=QueuePool,
-                pool_size=20,  # Number of connections to maintain
-                max_overflow=30,  # Additional connections when needed
-                pool_pre_ping=True,  # Validate connections
-                pool_recycle=3600,  # Recycle connections every hour
-                echo=False  # Set to True for SQL debugging
+                pool_size=5,
+                max_overflow=10,
+                pool_pre_ping=True,
+                pool_recycle=3600,
+                echo=False,
             )
-            
+
             self.session_factory = async_sessionmaker(
                 bind=self.engine,
                 class_=AsyncSession,
-                expire_on_commit=False
+                expire_on_commit=False,
             )
-            
+
             logger.info("✅ Database connection pool initialized")
-            
+
         except Exception as e:
             logger.error(f"❌ Database pool initialization failed: {e}")
             self.engine = None
             self.session_factory = None
-    
+
     async def close(self):
         """Close database connections"""
         if self.engine:
             await self.engine.dispose()
-    
+
     async def get_session(self) -> AsyncSession:
         """Get database session from pool"""
         if not self.session_factory:
             raise Exception("Database pool not initialized")
         return self.session_factory()
 
+
 # Global database pool instance
 db_pool = DatabasePool()
+
 
 async def get_db_session() -> AsyncSession:
     """Dependency to get database session"""
